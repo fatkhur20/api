@@ -20,7 +20,7 @@ async function checkProxy(proxy, timeout) {
         const latency = Date.now() - startTime;
         return { proxy, status: "alive", latency };
     } catch (e) {
-        throw e; // Re-throw to be caught by Promise.race
+        throw e;
     }
   })();
 
@@ -62,6 +62,15 @@ export class HealthCheckerDO {
     this.env = env;
   }
 
+  // The DO's fetch handler acts as a router for commands from the main worker.
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/start-full-check") {
+      return this.startFullCheck();
+    }
+    return new Response("Not found", { status: 404 });
+  }
+
   // The alarm is our main work loop for background processing.
   async alarm() {
     const proxies = await this.state.storage.get("proxies") || [];
@@ -69,8 +78,7 @@ export class HealthCheckerDO {
 
     if (currentIndex >= proxies.length) {
       console.log("Health check cycle complete.");
-      await this.state.storage.delete("current_index");
-      await this.state.storage.delete("proxies");
+      await this.state.storage.deleteAll();
       return;
     }
 
@@ -96,7 +104,7 @@ export class HealthCheckerDO {
     this.state.storage.setAlarm(Date.now() + 1000); // Check next proxy in 1 second
   }
 
-  // This method is called by the main worker to kick off a check cycle.
+  // This method is called via the DO's fetch handler.
   async startFullCheck() {
     const currentAlarm = await this.state.storage.getAlarm();
     if (currentAlarm != null) {
@@ -130,13 +138,12 @@ export default {
     try {
       const url = new URL(request.url);
       const path = url.pathname;
-      const id = env.HEALTH_CHECKER.idFromName("singleton-health-checker");
-      const stub = env.HEALTH_CHECKER.get(id);
 
       if (request.method === 'POST' && path === '/force-health') {
-        // Forward the request to the Durable Object to start the check.
-        // The DO itself will return a Response object.
-        return await stub.startFullCheck();
+        const id = env.HEALTH_CHECKER.idFromName("singleton-health-checker");
+        const stub = env.HEALTH_CHECKER.get(id);
+        // Send a request to the DO's fetch handler to trigger the process.
+        return stub.fetch(new Request("https://do/start-full-check", { method: "POST" }));
 
       } else if (path === '/health') {
         if (!env.PROXY_CACHE) {
@@ -150,7 +157,7 @@ export default {
           listResult = await env.PROXY_CACHE.list({ cursor: cursor, limit: 1000 });
           allKeys.push(...listResult.keys);
           cursor = listResult.cursor;
-        } while (!listResult.list_complete);
+        } while (listResult && !listResult.list_complete);
 
         const proxyKeys = allKeys.filter(key => !key.name.startsWith('_internal_'));
         const promises = proxyKeys.map(key => env.PROXY_CACHE.get(key.name, 'json'));
