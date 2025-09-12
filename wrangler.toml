@@ -11,7 +11,7 @@ bindings = [
 # Migration for the new Durable Object class. Required for first deployment.
 [[migrations]]
 tag = "v1"
-new_classes = ["HealthCheckerDO"]
+new_sqlite_classes = ["HealthCheckerDO"]
 
 # KV namespace for caching the results
 [[kv_namespaces]]
