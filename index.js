@@ -145,8 +145,9 @@ export default {
 
         const allKeys = [];
         let cursor = undefined;
+        let listResult;
         do {
-          const listResult = await env.PROXY_CACHE.list({ cursor: cursor, limit: 1000 });
+          listResult = await env.PROXY_CACHE.list({ cursor: cursor, limit: 1000 });
           allKeys.push(...listResult.keys);
           cursor = listResult.cursor;
         } while (!listResult.list_complete);
