@@ -1,0 +1,24 @@
+name = "api"
+main = "index.js"
+compatibility_date = "2024-03-26"
+
+# Binding for the Durable Object that manages health checks
+[durable_objects]
+bindings = [
+  { name = "HEALTH_CHECKER", class_name = "HealthCheckerDO" }
+]
+
+# Migration for the new Durable Object class. Required for first deployment.
+[[migrations]]
+tag = "v1"
+new_classes = ["HealthCheckerDO"]
+
+# KV namespace for caching the results
+[[kv_namespaces]]
+binding = "PROXY_CACHE"
+id = "c7912c6640f64f119fa5d628fc5cd354" # IMPORTANT: The user must fill this in
+preview_id = "your-kv-namespace-preview-id-here" # IMPORTANT: The user must fill this in
+
+[vars]
+PROXY_LIST_URL = "https://raw.githubusercontent.com/FoolVPN-ID/Nautica/refs/heads/main/proxyList.txt"
+HEALTH_CHECK_TIMEOUT = "5000"
