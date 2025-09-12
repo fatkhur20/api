@@ -1,10 +1,11 @@
 import { connect } from 'cloudflare:sockets';
 
-// --- Helper Functions ---
-
-// Performs a TCP connection test to a given proxy.
+// --- Helper: Performs a TCP connection test to a given proxy ---
 async function checkProxy(proxy, timeout) {
   const [hostname, portStr] = proxy.split(":");
+  if (!hostname || !portStr) {
+    return { proxy, status: "dead", latency: null };
+  }
   const port = parseInt(portStr, 10);
 
   const timeoutPromise = new Promise((_, reject) =>
@@ -19,8 +20,7 @@ async function checkProxy(proxy, timeout) {
         const latency = Date.now() - startTime;
         return { proxy, status: "alive", latency };
     } catch (e) {
-        // re-throw to be caught by Promise.race
-        throw e;
+        throw e; // Re-throw to be caught by Promise.race
     }
   })();
 
@@ -31,8 +31,7 @@ async function checkProxy(proxy, timeout) {
   }
 }
 
-
-// Fetches and parses the list of proxies from the source URL.
+// --- Helper: Fetches and parses the list of proxies from the source URL ---
 async function getProxyList(env) {
   const response = await fetch(env.PROXY_LIST_URL);
   if (!response.ok) {
@@ -56,41 +55,32 @@ async function getProxyList(env) {
     .filter(Boolean);
 }
 
-// --- Durable Object Class ---
-
+// --- The Durable Object Class for Health Checking ---
 export class HealthCheckerDO {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    // We use `this.state.blockConcurrencyWhile()` to ensure we don't have races
-    // between the alarm and other events.
-    this.state.blockConcurrencyWhile(async () => {
-        let stored = await this.state.storage.get("current_index");
-        this.currentIndex = stored || 0;
-    });
   }
 
+  // The alarm is our main work loop for background processing.
   async alarm() {
-    // Get the list of proxies from storage
     const proxies = await this.state.storage.get("proxies") || [];
-    if (this.currentIndex >= proxies.length) {
+    let currentIndex = await this.state.storage.get("current_index") || 0;
+
+    if (currentIndex >= proxies.length) {
       console.log("Health check cycle complete.");
-      // Optional: clear the list and index if you want it to stop until `startFullCheck` is called again
       await this.state.storage.delete("current_index");
       await this.state.storage.delete("proxies");
       return;
     }
 
-    // Get the specific proxy for this alarm
-    const proxyData = proxies[this.currentIndex];
+    const proxyData = proxies[currentIndex];
     const proxyAddress = `${proxyData.ip}:${proxyData.port}`;
-    console.log(`DO Alarm: Checking proxy #${this.currentIndex}: ${proxyAddress}`);
+    console.log(`DO Alarm: Checking proxy #${currentIndex}: ${proxyAddress}`);
 
-    // Perform the health check
     const timeout = parseInt(this.env.HEALTH_CHECK_TIMEOUT || '5000', 10);
     const healthResult = await checkProxy(proxyAddress, timeout);
 
-    // Combine with enrichment data
     const finalData = {
       proxy: proxyAddress,
       status: healthResult.status,
@@ -99,41 +89,32 @@ export class HealthCheckerDO {
       isp: proxyData.isp,
     };
 
-    // Save the result to KV with a 1-hour TTL
     await this.env.PROXY_CACHE.put(proxyAddress, JSON.stringify(finalData), { expirationTtl: 3600 });
 
-    // Increment index and set alarm for the next one
-    this.currentIndex++;
-    await this.state.storage.put("current_index", this.currentIndex);
-
-    // Set the next alarm
-    this.state.storage.setAlarm(Date.now() + 1000); // 1 second between checks
+    currentIndex++;
+    await this.state.storage.put("current_index", currentIndex);
+    this.state.storage.setAlarm(Date.now() + 1000); // Check next proxy in 1 second
   }
 
   // This method is called by the main worker to kick off a check cycle.
   async startFullCheck() {
+    const currentAlarm = await this.state.storage.getAlarm();
+    if (currentAlarm != null) {
+      return new Response("Health check process is already running.", { status: 409 });
+    }
+
     console.log("startFullCheck called. Fetching proxy list...");
     const proxies = await getProxyList(this.env);
     await this.state.storage.put("proxies", proxies);
     await this.state.storage.put("current_index", 0);
-    this.currentIndex = 0;
 
-    // Set the first alarm to kick off the process
-    const currentAlarm = await this.state.storage.getAlarm();
-    if (currentAlarm == null) {
-        this.state.storage.setAlarm(Date.now() + 1000);
-        console.log("Proxy list fetched and first alarm set.");
-        return new Response("Health check process initiated.", { status: 200 });
-    } else {
-        console.log("Health check process is already running.");
-        return new Response("Health check process is already running.", { status: 200 });
-    }
+    this.state.storage.setAlarm(Date.now() + 1000);
+    console.log("Proxy list fetched and first alarm set.");
+    return new Response("Health check process initiated.", { status: 202 });
   }
 }
 
-
 // --- Main Worker Logic ---
-
 export default {
   async fetch(request, env, ctx) {
     const corsHeaders = {
@@ -149,19 +130,19 @@ export default {
     try {
       const url = new URL(request.url);
       const path = url.pathname;
-
       const id = env.HEALTH_CHECKER.idFromName("singleton-health-checker");
       const stub = env.HEALTH_CHECKER.get(id);
 
       if (request.method === 'POST' && path === '/force-health') {
-        const response = await stub.startFullCheck();
-        return new Response(response.body, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        // Forward the request to the Durable Object to start the check.
+        // The DO itself will return a Response object.
+        return await stub.startFullCheck();
+
       } else if (path === '/health') {
         if (!env.PROXY_CACHE) {
-          return new Response("KV Namespace not configured.", { status: 500, headers: corsHeaders });
+          return new Response("KV Namespace 'PROXY_CACHE' is not configured.", { status: 500, headers: corsHeaders });
         }
 
-        // Use a loop with a cursor to fetch all keys, overcoming the 1000-key limit.
         const allKeys = [];
         let cursor = undefined;
         do {
@@ -170,9 +151,7 @@ export default {
           cursor = listResult.cursor;
         } while (!listResult.list_complete);
 
-        // Filter out the internal state key before fetching values
-        const proxyKeys = allKeys.filter(key => key.name !== '_internal_state');
-
+        const proxyKeys = allKeys.filter(key => !key.name.startsWith('_internal_'));
         const promises = proxyKeys.map(key => env.PROXY_CACHE.get(key.name, 'json'));
         let results = await Promise.all(promises);
 
@@ -184,6 +163,7 @@ export default {
           headers: { 'Content-Type': 'application/json;charset=UTF-8', ...corsHeaders },
         });
       } else {
+        // Default behavior: return the raw, unchecked list.
         const proxies = await getProxyList(env);
         const proxyStrings = proxies.map(p => `${p.ip}:${p.port}`);
         return new Response(JSON.stringify(proxyStrings, null, 2), {
