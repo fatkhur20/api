@@ -16,7 +16,7 @@ new_sqlite_classes = ["HealthCheckerDO"]
 # KV namespace for caching the results
 [[kv_namespaces]]
 binding = "PROXY_CACHE"
-id = "c7912c6640f64f119fa5d628fc5cd354" # IMPORTANT: The user must fill this in
+id = "22b7a7552073455492f6177889d1c384" # IMPORTANT: The user must fill this in
 preview_id = "your-kv-namespace-preview-id-here" # IMPORTANT: The user must fill this in
 
 [vars]
